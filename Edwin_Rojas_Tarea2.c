@@ -4,7 +4,6 @@
 #include <string.h>
 
 #define MAGIC_STRING 0xaaae
-
 #define NAME_SIZE 23
 #define COURSE_NAME_SIZE 32
 
@@ -41,12 +40,17 @@ uint16_t read_big_endian_16(FILE *file) {
 
 // Función para leer un valor de 32 bits en formato little endian
 uint32_t read_little_endian_32(FILE *file) {
-    uint8_t byte1, byte2, byte3, byte4;
-    fread(&byte1, sizeof(uint8_t), 1, file);
-    fread(&byte2, sizeof(uint8_t), 1, file);
-    fread(&byte3, sizeof(uint8_t), 1, file);
-    fread(&byte4, sizeof(uint8_t), 1, file);
-    return (uint32_t)(byte1) | (uint32_t)(byte2 << 8) | (uint32_t)(byte3 << 16) | (uint32_t)(byte4 << 24);
+    uint8_t bytes[4];
+    fread(bytes, sizeof(uint8_t), 4, file);
+    return (uint32_t)bytes[0] | (uint32_t)bytes[1] << 8 | (uint32_t)bytes[2] << 16 | (uint32_t)bytes[3] << 24;
+}
+
+// Función para liberar memoria y cerrar el archivo
+void cleanup(FILE *file, Student *students, Course *courses, Enrollment *enrollments) {
+    if (file) fclose(file);
+    if (students) free(students);
+    if (courses) free(courses);
+    if (enrollments) free(enrollments);
 }
 
 int main(int argc, char *argv[]) {
@@ -62,45 +66,64 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-     uint16_t magic = read_big_endian_16(file);
+    // Verificar cadena mágica
+    uint16_t magic = read_big_endian_16(file);
     if (magic != MAGIC_STRING) {
         printf("Archivo binario no válido. Se esperaba la cadena mágica: 0xaaae, pero se leyó: 0x%04x\n", magic);
-        fclose(file);
+        cleanup(file, NULL, NULL, NULL);
         return 1;
     }
 
-
-    // Leer la cantidad de estudiantes, cursos y matrículas
+    // Leer cantidad de estudiantes, cursos y matrículas
     uint32_t student_count = read_little_endian_32(file);
     uint32_t course_count = read_little_endian_32(file);
     uint32_t enrollment_count = read_little_endian_32(file);
 
-    // Leer los estudiantes
+    // Reservar memoria
     Student *students = malloc(student_count * sizeof(Student));
+    Course *courses = malloc(course_count * sizeof(Course));
+    Enrollment *enrollments = malloc(enrollment_count * sizeof(Enrollment));
+
+    if (!students || !courses || !enrollments) {
+        printf("Error al asignar memoria.\n");
+        cleanup(file, students, courses, enrollments);
+        return 1;
+    }
+
+    // Leer estudiantes
     for (uint32_t i = 0; i < student_count; i++) {
         students[i].id = read_little_endian_32(file);
         fread(&students[i].flags, sizeof(uint8_t), 1, file);
         fread(students[i].name, sizeof(char), NAME_SIZE, file);
-        students[i].name[NAME_SIZE] = '\0'; // Asegurar que el nombre está terminado en '\0'
+        students[i].name[NAME_SIZE] = '\0'; // Asegurar terminación de cadena
         students[i].age = read_little_endian_32(file);
     }
 
-    // Leer los cursos
-    Course *courses = malloc(course_count * sizeof(Course));
+    // Leer cursos
     for (uint32_t i = 0; i < course_count; i++) {
         courses[i].id = read_little_endian_32(file);
         fread(courses[i].name, sizeof(char), COURSE_NAME_SIZE, file);
-        courses[i].name[COURSE_NAME_SIZE] = '\0'; // Asegurar que el nombre está terminado en '\0'
+        courses[i].name[COURSE_NAME_SIZE] = '\0'; // Asegurar terminación de cadena
         courses[i].credit_hours = read_little_endian_32(file);
     }
 
-    // Leer las matrículas
-    Enrollment *enrollments = malloc(enrollment_count * sizeof(Enrollment));
+    // Leer matrículas
     for (uint32_t i = 0; i < enrollment_count; i++) {
         enrollments[i].student_id = read_little_endian_32(file);
         enrollments[i].course_id = read_little_endian_32(file);
         enrollments[i].year = read_little_endian_32(file);
         enrollments[i].semester = read_little_endian_32(file);
+    }
+
+    // Crear un mapa para encontrar estudiantes por ID rápidamente
+    uint32_t *student_age_map = malloc(student_count * sizeof(uint32_t));
+    if (!student_age_map) {
+        printf("Error al asignar memoria para el mapa de estudiantes.\n");
+        cleanup(file, students, courses, enrollments);
+        return 1;
+    }
+    for (uint32_t i = 0; i < student_count; i++) {
+        student_age_map[students[i].id] = students[i].age;
     }
 
     // Imprimir encabezado de la tabla
@@ -113,34 +136,26 @@ int main(int argc, char *argv[]) {
         int total_age = 0;
         int student_count_in_course = 0;
 
+        // Recorrer matrículas y contar edades de los estudiantes por curso
         for (uint32_t j = 0; j < enrollment_count; j++) {
             if (enrollments[j].course_id == course_id) {
-                // Buscar la edad del estudiante por ID
-                for (uint32_t k = 0; k < student_count; k++) {
-                    if (students[k].id == enrollments[j].student_id) {
-                        total_age += students[k].age;
-                        student_count_in_course++;
-                        break;
-                    }
-                }
+                uint32_t student_id = enrollments[j].student_id;
+                total_age += student_age_map[student_id];
+                student_count_in_course++;
             }
         }
 
         if (student_count_in_course > 0) {
             double average_age = (double)total_age / student_count_in_course;
-            // Imprimir curso y edad promedio
             printf("%-35s %-15.2f\n", courses[i].name, average_age);
         } else {
-            // Si no hay estudiantes matriculados, imprimir sin edad promedio
             printf("%-35s %-15s\n", courses[i].name, "No hay estudiantes");
         }
     }
 
     // Liberar memoria y cerrar el archivo
-    free(students);
-    free(courses);
-    free(enrollments);
-    fclose(file);
+    free(student_age_map);
+    cleanup(file, students, courses, enrollments);
 
     return 0;
 }
